@@ -1,0 +1,515 @@
+{
+	"name": "Silver_to_Gold_transformation",
+	"properties": {
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "projsparkpool",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "28g",
+			"driverCores": 4,
+			"executorMemory": "28g",
+			"executorCores": 4,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "1fef3c05-5f37-4644-97d5-a0eb23a9aa92"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/49a5e15e-626c-4e4c-8752-d06f2a37c581/resourceGroups/rg_azure_practice/providers/Microsoft.Synapse/workspaces/ws-azuresynapse/bigDataPools/projsparkpool",
+				"name": "projsparkpool",
+				"type": "Spark",
+				"endpoint": "https://ws-azuresynapse.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/projsparkpool",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.5",
+				"nodeCount": 3,
+				"cores": 4,
+				"memory": 28,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### 1. Watermark Table"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"from delta.tables import DeltaTable\n",
+					"from pyspark.sql.functions import *\n",
+					"\n",
+					"control_path = \"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/pipeline_watermark\"\n",
+					"\n",
+					"if not DeltaTable.isDeltaTable(spark, control_path):\n",
+					"    spark.createDataFrame(\n",
+					"        [(\"Fact_Patient_Visit\", \"1900-01-01\")],\n",
+					"        [\"table_name\", \"last_processed_ts\"]\n",
+					"    ).write.format(\"delta\").save(control_path)"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Read Watermark"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"control_df = spark.read.format(\"delta\").load(control_path)\n",
+					"\n",
+					"last_ts = control_df.filter(col(\"table_name\") == \"Fact_Patient_Visit\") \\\n",
+					"                     .select(\"last_processed_ts\") \\\n",
+					"                     .collect()[0][0]"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### 2. Read Silver Tables"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"patients_df = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/silver/Patients/\")\n",
+					"admissions_df = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/silver/Admissions/\")\n",
+					"diagnosis_map_df = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/silver/Diagnoses_icd/\")\n",
+					"diagnosis_ref_df = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/silver/D_icd_diagnoses/\")\n",
+					"insurance_df = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/silver/Insurance/\")\n",
+					"doctors_df = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/silver/Doctors/\")\n",
+					"departments_df = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/silver/Departments/\")\n",
+					""
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### 3. Incremental Filter"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"admissions_incremental = admissions_df \\\n",
+					"    .filter(col(\"admittime\") > last_ts)"
+				],
+				"execution_count": 19
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### 4. Build Fact Base"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"fact_base = admissions_incremental \\\n",
+					"    .join(diagnosis_map_df.dropDuplicates([\"visit_id\"]), \n",
+					"          \"visit_id\", \n",
+					"          \"left\") \\\n",
+					"    .join(diagnosis_ref_df, \"icd_code\", \"left\")\n",
+					"\n",
+					"#--Rename\n",
+					"fact_base = fact_base.withColumnRenamed(\n",
+					"    \"admit_provider_id\", \"doctor_id\"\n",
+					")\n",
+					""
+				],
+				"execution_count": 20
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### - Simulate revenue."
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"from pyspark.sql.functions import rand\n",
+					"\n",
+					"fact_base = fact_base \\\n",
+					"    .withColumn(\"total_amount\", (rand()*10000).cast(\"double\")) \\\n",
+					"    .withColumn(\"insurance_amount\", col(\"total_amount\")*0.7) \\\n",
+					"    .withColumn(\"self_pay_amount\", col(\"total_amount\")*0.3) \\\n",
+					"    .withColumn(\"medicine_cost\", (rand()*2000).cast(\"double\"))"
+				],
+				"execution_count": 21
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Create Dim_Date"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"\n",
+					"from pyspark.sql.functions import *\n",
+					"\n",
+					"dim_date = admissions_df \\\n",
+					"    .select(to_date(\"admittime\").alias(\"full_date\")) \\\n",
+					"    .distinct() \\\n",
+					"    .withColumn(\"day\", dayofmonth(\"full_date\")) \\\n",
+					"    .withColumn(\"month\", month(\"full_date\")) \\\n",
+					"    .withColumn(\"quarter\", quarter(\"full_date\")) \\\n",
+					"    .withColumn(\"year\", year(\"full_date\"))\n",
+					"\n",
+					"from pyspark.sql.window import Window\n",
+					"from pyspark.sql.functions import row_number\n",
+					"\n",
+					"window_spec = Window.orderBy(\"full_date\")\n",
+					"\n",
+					"dim_date = dim_date.withColumn(\"date_sk\", row_number().over(window_spec))\n",
+					"\n",
+					"dim_date.write.format(\"delta\").mode(\"overwrite\").save(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/Dim_Date/\")"
+				],
+				"execution_count": 22
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Create Dim_Patient"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"from pyspark.sql.functions import current_date, lit\n",
+					"\n",
+					"dim_patient = patients_df \\\n",
+					"    .withColumn(\"effective_from\", current_date()) \\\n",
+					"    .withColumn(\"effective_to\", lit(\"9999-12-31\").cast(\"date\")) \\\n",
+					"    .withColumn(\"is_current\", lit(\"Y\"))\n",
+					"\n",
+					"window_spec = Window.orderBy(\"patient_id\")\n",
+					"\n",
+					"dim_patient = dim_patient \\\n",
+					"    .withColumn(\"patient_sk\", row_number().over(window_spec))\n",
+					"\n",
+					"dim_patient.write.format(\"delta\").mode(\"overwrite\").save(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/Dim_Patient/\")"
+				],
+				"execution_count": 23
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Create Dim_Doctor"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"window_spec = Window.orderBy(\"doctor_id\")\n",
+					"\n",
+					"dim_doctor = doctors_df \\\n",
+					"    .withColumn(\"doctor_sk\", row_number().over(window_spec))\n",
+					"\n",
+					"dim_doctor.write.format(\"delta\").mode(\"overwrite\").save(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/Dim_Doctor/\")"
+				],
+				"execution_count": 24
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Create Dim_Department"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"from pyspark.sql.functions import monotonically_increasing_id\n",
+					"\n",
+					"dim_department = departments_df \\\n",
+					"    .select(\"department_id\", \"department_name\", \"department_head\") \\\n",
+					"    .distinct() \\\n",
+					"    .withColumn(\"department_sk\", monotonically_increasing_id())\n",
+					"\n",
+					"dim_department.write.format(\"delta\").mode(\"overwrite\").save(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/Dim_Department/\")"
+				],
+				"execution_count": 46
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Create Dim_Diagnosis"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"from pyspark.sql.window import Window\n",
+					"from pyspark.sql.functions import row_number\n",
+					"\n",
+					"dim_diagnosis = diagnosis_map_df \\\n",
+					"    .join(diagnosis_ref_df, \"icd_code\", \"left\") \\\n",
+					"    .select(\n",
+					"        col(\"icd_code\").alias(\"diagnosis_code\"),\n",
+					"        col(\"long_title\").alias(\"diagnosis_description\")\n",
+					"    ) \\\n",
+					"    .distinct()\n",
+					"\n",
+					"window_spec = Window.orderBy(\"diagnosis_code\")\n",
+					"\n",
+					"dim_diagnosis = dim_diagnosis.withColumn(\"diagnosis_sk\", row_number().over(window_spec))\n",
+					"\n",
+					"dim_diagnosis.write.format(\"delta\").mode(\"overwrite\").save(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/Dim_Diagnosis/\")"
+				],
+				"execution_count": 36
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Replace Business Keys with Surrogate Keys"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"dim_patient = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/Dim_Patient/\")\n",
+					"dim_doctor = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold//Dim_Doctor/\")\n",
+					"dim_diagnosis = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/Dim_Diagnosis/\")\n",
+					"dim_date = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/Dim_Date/\")\n",
+					"dim_department = spark.read.format(\"delta\").load(\"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/Dim_Department\")\n",
+					"\n",
+					"fact_final = fact_base \\\n",
+					"    .join(dim_patient.filter(col(\"is_current\")==\"Y\"), \"patient_id\") \\\n",
+					"    .join(dim_doctor, \"doctor_id\", \"left\") \\\n",
+					"    .join(dim_diagnosis,\n",
+					"          fact_base.icd_code == dim_diagnosis.diagnosis_code,\n",
+					"          \"left\") \\\n",
+					"    .join(dim_date, \n",
+					"          to_date(fact_base.admittime)==dim_date.full_date, \n",
+					"          \"left\") \\\n",
+					"    .select(\n",
+					"        \"visit_id\",\n",
+					"        \"patient_sk\",\n",
+					"        \"doctor_sk\",\n",
+					"        \"diagnosis_sk\",\n",
+					"        \"date_sk\",\n",
+					"        \"total_amount\",\n",
+					"        \"insurance_amount\",\n",
+					"        \"self_pay_amount\",\n",
+					"        \"medicine_cost\"\n",
+					"    ) \\\n",
+					"    .withColumn(\"visit_count\", lit(1))"
+				],
+				"execution_count": 51
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Fact MERGE"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"fact_path = \"abfss://con-healthcare-proj@saazurepractice12.dfs.core.windows.net/gold/Fact_Patient_Visit\"\n",
+					"\n",
+					"if DeltaTable.isDeltaTable(spark, fact_path):\n",
+					"\n",
+					"    delta_table = DeltaTable.forPath(spark, fact_path)\n",
+					"\n",
+					"    delta_table.alias(\"target\").merge(\n",
+					"        fact_final.alias(\"source\"),\n",
+					"        \"target.visit_id = source.visit_id\"\n",
+					"    ).whenMatchedUpdate(set={\n",
+					"        \"total_amount\": \"source.total_amount\",\n",
+					"        \"insurance_amount\": \"source.insurance_amount\",\n",
+					"        \"self_pay_amount\": \"source.self_pay_amount\",\n",
+					"        \"medicine_cost\": \"source.medicine_cost\"\n",
+					"    }).whenNotMatchedInsertAll().execute()\n",
+					"\n",
+					"else:\n",
+					"    fact_final.write.format(\"delta\").save(fact_path)"
+				],
+				"execution_count": 52
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Update Watermark"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"new_ts = admissions_incremental \\\n",
+					"    .agg(max(\"admittime\")) \\\n",
+					"    .collect()[0][0]\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"UPDATE delta.`{control_path}`\n",
+					"SET last_processed_ts = '{new_ts}'\n",
+					"WHERE table_name = 'Fact_Patient_Visit'\n",
+					"\"\"\")"
+				],
+				"execution_count": 53
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### GOLD VALIDATIONS"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#-Referential Integrity\n",
+					"fact_final.join(dim_patient, \"patient_sk\", \"left_anti\").count()\n",
+					"\n",
+					"#-Range Checks\n",
+					"fact_final.filter(col(\"total_amount\") < 0).count()\n",
+					"\n",
+					"#-Grain Check\n",
+					"fact_final.groupBy(\"visit_id\").count().filter(\"count>1\").count()"
+				],
+				"execution_count": 54
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"display(fact_final.columns)"
+				],
+				"execution_count": 55
+			}
+		]
+	}
+}
