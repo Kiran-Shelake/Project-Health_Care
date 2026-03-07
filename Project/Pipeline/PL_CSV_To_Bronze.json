@@ -1,0 +1,152 @@
+{
+	"name": "PL_CSV_To_Bronze",
+	"properties": {
+		"activities": [
+			{
+				"name": "Get_File_List",
+				"type": "GetMetadata",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.10:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"dataset": {
+						"referenceName": "DS_PJ1_CSV_Source",
+						"type": "DatasetReference"
+					},
+					"fieldList": [
+						"childItems"
+					],
+					"storeSettings": {
+						"type": "AzureBlobFSReadSettings",
+						"recursive": true,
+						"enablePartitionDiscovery": false
+					},
+					"formatSettings": {
+						"type": "DelimitedTextReadSettings"
+					}
+				}
+			},
+			{
+				"name": "ForEach_File",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "Get_File_List",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@activity('Get_File_List').output.childItems",
+						"type": "Expression"
+					},
+					"activities": [
+						{
+							"name": "Copy_data",
+							"type": "Copy",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.10:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"source": {
+									"type": "DelimitedTextSource",
+									"storeSettings": {
+										"type": "AzureBlobFSReadSettings",
+										"recursive": false,
+										"wildcardFolderPath": {
+											"value": "Raw",
+											"type": "Expression"
+										},
+										"wildcardFileName": {
+											"value": "@item().name",
+											"type": "Expression"
+										},
+										"enablePartitionDiscovery": false
+									},
+									"formatSettings": {
+										"type": "DelimitedTextReadSettings"
+									}
+								},
+								"sink": {
+									"type": "ParquetSink",
+									"storeSettings": {
+										"type": "AzureBlobFSWriteSettings",
+										"metadata": [
+											{
+												"name": "ingestion_date",
+												"value": {
+													"value": "@formatDateTime(utcNow(),'yyyy-MM-dd')",
+													"type": "Expression"
+												}
+											},
+											{
+												"name": "load_timestamp",
+												"value": {
+													"value": "@utcNow()",
+													"type": "Expression"
+												}
+											}
+										]
+									},
+									"formatSettings": {
+										"type": "ParquetWriteSettings"
+									}
+								},
+								"enableStaging": false,
+								"translator": {
+									"type": "TabularTranslator",
+									"typeConversion": true,
+									"typeConversionSettings": {
+										"allowDataTruncation": true,
+										"treatBooleanAsNumber": false
+									}
+								}
+							},
+							"inputs": [
+								{
+									"referenceName": "DS_PJ1_CSV_Source",
+									"type": "DatasetReference"
+								}
+							],
+							"outputs": [
+								{
+									"referenceName": "DS_PJ1_Bronze_Parquet",
+									"type": "DatasetReference",
+									"parameters": {
+										"FolderName": {
+											"value": "@replace(item().name,'.csv','')",
+											"type": "Expression"
+										},
+										"FileName": {
+											"value": "@concat(formatDateTime(utcNow(), 'yyyy-MM-dd''T''HH:mm:ss'), '.parquet')",
+											"type": "Expression"
+										}
+									}
+								}
+							]
+						}
+					]
+				}
+			}
+		],
+		"folder": {
+			"name": "Healthcare-Project"
+		},
+		"annotations": []
+	}
+}
